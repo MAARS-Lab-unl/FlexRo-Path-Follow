@@ -4,12 +4,16 @@ import {
   useJsApiLoader,
   Marker,
   Polyline,
+  InfoWindow,
 } from "@react-google-maps/api";
 import { api } from "./api";
 import { ConnectionConfig } from "./types";
+import { haversineMeters, formatDistance } from "./geoUtils";
 
 const WS_TX_URL = (process.env.REACT_APP_WS_URL || "ws://localhost:8000/ws/gps")
   .replace("/ws/gps", "/ws/tx");
+const WS_ROBOT_URL = (process.env.REACT_APP_WS_URL || "ws://localhost:8000/ws/gps")
+  .replace("/ws/gps", "/ws/robot");
 
 const MAP_CONTAINER_STYLE = { width: "100%", height: "100%" };
 const DEFAULT_CENTER = { lat: 32.7767, lng: -96.797 };
@@ -45,11 +49,16 @@ export default function SenderScreen({ connection, onDisconnect }: Props) {
   // Map state
   const [atvPos, setAtvPos] = useState<google.maps.LatLngLiteral | null>(null);
   const [trail, setTrail] = useState<google.maps.LatLngLiteral[]>([]);
+  // Robot position received back over radio
+  const [robotPos, setRobotPos] = useState<google.maps.LatLngLiteral | null>(null);
+  const [robotDeviceId, setRobotDeviceId] = useState("ROBOT");
+  const [showRobotInfo, setShowRobotInfo] = useState(false);
   const mapRef = useRef<google.maps.Map | null>(null);
   const firstFix = useRef(false);
 
   const logEndRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const robotWsRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -89,6 +98,23 @@ export default function SenderScreen({ connection, onDisconnect }: Props) {
     connectWs();
     return () => { wsRef.current?.close(); };
   }, [connectWs]);
+
+  // Robot GPS coming back over radio
+  useEffect(() => {
+    const ws = new WebSocket(WS_ROBOT_URL);
+    robotWsRef.current = ws;
+    ws.onmessage = (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        if (data.type === "robot_gps") {
+          setRobotPos({ lat: data.lat, lng: data.lon });
+          setRobotDeviceId(data.device_id || "ROBOT");
+        }
+      } catch {}
+    };
+    ws.onclose = () => { robotWsRef.current = null; };
+    return () => ws.close();
+  }, []);
 
   // Restore state on mount (page refresh)
   useEffect(() => {
@@ -158,6 +184,14 @@ export default function SenderScreen({ connection, onDisconnect }: Props) {
             <span style={styles.pulseDot} />
             TX ACTIVE — {totalSent} packets sent
           </span>
+        )}
+        {robotPos ? (
+          <span style={styles.pairedPill}>
+            ✓ Robot paired · {robotDeviceId}
+            {atvPos && ` · ${formatDistance(haversineMeters(atvPos.lat, atvPos.lng, robotPos.lat, robotPos.lng))}`}
+          </span>
+        ) : (
+          <span style={styles.waitingPill}>Waiting for robot GPS…</span>
         )}
         <button style={styles.discBtn} onClick={handleDisconnect}>Disconnect</button>
       </div>
@@ -246,6 +280,42 @@ export default function SenderScreen({ connection, onDisconnect }: Props) {
                   }}
                 />
               )}
+
+              {/* Distance line ATV ↔ Robot */}
+              {atvPos && robotPos && (
+                <Polyline
+                  path={[atvPos, robotPos]}
+                  options={{ strokeColor: "#a78bfa", strokeOpacity: 0.6, strokeWeight: 1.5, strokeDashArray: "6 4" } as any}
+                />
+              )}
+
+              {/* Robot marker — blue circle */}
+              {robotPos && (
+                <Marker
+                  position={robotPos}
+                  onClick={() => setShowRobotInfo((v) => !v)}
+                  title={`Robot: ${robotDeviceId}`}
+                  icon={{
+                    path: window.google.maps.SymbolPath.CIRCLE,
+                    scale: 8,
+                    fillColor: "#38bdf8",
+                    fillOpacity: 1,
+                    strokeColor: "#fff",
+                    strokeWeight: 2,
+                  }}
+                >
+                  {showRobotInfo && (
+                    <InfoWindow onCloseClick={() => setShowRobotInfo(false)}>
+                      <div style={{ fontSize: 13, lineHeight: 1.7 }}>
+                        <strong>{robotDeviceId} (Robot)</strong><br />
+                        Lat: {robotPos.lat.toFixed(7)}<br />
+                        Lng: {robotPos.lng.toFixed(7)}
+                        {atvPos && <><br />Distance to ATV: {formatDistance(haversineMeters(robotPos.lat, robotPos.lng, atvPos.lat, atvPos.lng))}</>}
+                      </div>
+                    </InfoWindow>
+                  )}
+                </Marker>
+              )}
             </GoogleMap>
           )}
           {isLoaded && !atvPos && (
@@ -303,6 +373,8 @@ const styles: Record<string, React.CSSProperties> = {
   greenDot: { width: 7, height: 7, borderRadius: "50%", background: "#22c55e", display: "inline-block" },
   txPill: { background: "#052e16", color: "#4ade80", borderRadius: 20, padding: "3px 12px", fontSize: 12, fontFamily: "monospace", flex: 1, display: "flex", alignItems: "center", gap: 6 },
   pulseDot: { width: 7, height: 7, borderRadius: "50%", background: "#22c55e", flexShrink: 0, animation: "pulse 1.2s infinite" },
+  pairedPill: { background: "#052e16", color: "#4ade80", borderRadius: 20, padding: "3px 12px", fontSize: 12, fontFamily: "monospace" },
+  waitingPill: { color: "#475569", fontSize: 12, fontStyle: "italic" },
   discBtn: { marginLeft: "auto", background: "#7f1d1d", color: "#fca5a5", border: "none", borderRadius: 6, padding: "6px 14px", cursor: "pointer", fontWeight: 600, fontSize: 13 },
   body: { display: "flex", flex: 1, overflow: "hidden" },
   panel: { width: 240, background: "#1e293b", padding: "16px 14px", display: "flex", flexDirection: "column", gap: 6, overflowY: "auto", flexShrink: 0, borderRight: "1px solid #334155" },

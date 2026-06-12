@@ -47,15 +47,24 @@ export default function MapScreen({ connection, onDisconnect }: Props) {
   const mapRef = useRef<google.maps.Map | null>(null);
   const firstFix = useRef(false);
 
-  // Get robot's own position via geolocation
+  // Get robot's own position and push to backend for radio transmit back to ATV
   useEffect(() => {
     if (!navigator.geolocation) return;
     const watch = navigator.geolocation.watchPosition(
-      (pos) => setRobotPos({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
+      (pos) => {
+        const { latitude: lat, longitude: lng } = pos.coords;
+        setRobotPos({ lat, lng });
+        api.robotPosition(lat, lng);
+      },
       () => {},
       { enableHighAccuracy: true, maximumAge: 3000 }
     );
-    return () => navigator.geolocation.clearWatch(watch);
+    // Start robot transmit loop automatically when receiver connects
+    api.robotTransmitStart(1.0);
+    return () => {
+      navigator.geolocation.clearWatch(watch);
+      api.robotTransmitStop();
+    };
   }, []);
 
   const onPacket = useCallback((p: GpsPacket) => {

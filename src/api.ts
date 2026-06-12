@@ -20,4 +20,9 @@ export const api = {
   simulateStart: (lat: number, lon: number, interval: number) =>
     post("/api/simulate/start", { lat, lon, interval }),
   simulateStop: () => post("/api/simulate/stop"),
+  robotPosition: (lat: number, lon: number) =>
+    post("/api/robot/position", { lat, lon }),
+  robotTransmitStart: (interval: number) =>
+    post("/api/robot/transmit/start", { interval }),
+  robotTransmitStop: () => post("/api/robot/transmit/stop"),
 };

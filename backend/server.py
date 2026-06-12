@@ -81,6 +81,21 @@ class AppState:
         self.last_atv_time: str = ""
         self.atv_paired: bool = False
 
+        # robot self-position (receiver side — browser pushes geolocation here)
+        self.robot_lat: float = 0.0
+        self.robot_lon: float = 0.0
+        self.robot_time: str = ""
+        self.robot_pos_set: bool = False
+
+        # robot transmit loop (sends robot GPS back over radio to ATV)
+        self.robot_tx_thread: Optional[threading.Thread] = None
+        self.robot_tx_stop = threading.Event()
+        self.robot_tx_running: bool = False
+        self.robot_tx_interval: float = 1.0
+
+        # WebSocket clients that receive incoming robot GPS (on sender side)
+        self.robot_clients: list[WebSocket] = []
+
 state = AppState()
 _main_loop: asyncio.AbstractEventLoop | None = None
 
@@ -157,21 +172,36 @@ def serial_reader_loop():
         except json.JSONDecodeError:
             pass
         if data is not None and data.get("type") == "gps":
-            print(f"[serial] broadcasting GPS to {len(state.ws_clients)} WebSocket client(s)")
-            state.last_atv_lat = data.get("lat", 0.0)
-            state.last_atv_lon = data.get("lon", 0.0)
-            state.last_atv_device_id = data.get("device_id", "unknown")
-            state.last_atv_time = receive_time
-            state.atv_paired = True
-            broadcast_sync(state.ws_clients, {
-                "type": "gps",
-                "receive_time_utc": receive_time,
-                "lat": data.get("lat"),
-                "lon": data.get("lon"),
-                "timestamp_utc": data.get("timestamp_utc"),
-                "source": data.get("source", "serial"),
-                "device_id": data.get("device_id", ""),
-            })
+            src = data.get("source", "serial")
+            device_id = data.get("device_id", "")
+
+            if src == "robot":
+                # Incoming robot GPS on the sender side — forward to sender browser
+                print(f"[serial] received robot GPS from {device_id}")
+                broadcast_sync(state.robot_clients, {
+                    "type": "robot_gps",
+                    "receive_time_utc": receive_time,
+                    "lat": data.get("lat"),
+                    "lon": data.get("lon"),
+                    "device_id": device_id,
+                })
+            else:
+                # Incoming ATV GPS on the receiver side
+                print(f"[serial] broadcasting GPS to {len(state.ws_clients)} WebSocket client(s)")
+                state.last_atv_lat = data.get("lat", 0.0)
+                state.last_atv_lon = data.get("lon", 0.0)
+                state.last_atv_device_id = device_id or "unknown"
+                state.last_atv_time = receive_time
+                state.atv_paired = True
+                broadcast_sync(state.ws_clients, {
+                    "type": "gps",
+                    "receive_time_utc": receive_time,
+                    "lat": data.get("lat"),
+                    "lon": data.get("lon"),
+                    "timestamp_utc": data.get("timestamp_utc"),
+                    "source": src,
+                    "device_id": device_id,
+                })
         elif line.startswith("$GPRMC") or line.startswith("$GNRMC"):
             parsed = _parse_nmea_lat_lon(line)
             if parsed:
@@ -213,6 +243,38 @@ def simulation_loop(start_lat: float, start_lon: float, interval: float):
         step += 1
         time.sleep(interval)
     state.sim_running = False
+
+
+# ── Robot transmit loop (receiver side — sends robot GPS back to ATV) ─────────
+
+def _make_robot_packet() -> str:
+    return json.dumps({
+        "type": "gps",
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "lat": round(state.robot_lat, 7),
+        "lon": round(state.robot_lon, 7),
+        "source": "robot",
+        "device_id": state.device_id,
+        "radio": "RFD 900x-US",
+    }) + "\r\n"
+
+
+def robot_transmit_loop(interval: float):
+    while not state.robot_tx_stop.is_set():
+        if not state.robot_pos_set:
+            time.sleep(0.5)
+            continue
+        packet = _make_robot_packet()
+        with state.lock:
+            ser = state.ser
+        if ser and ser.is_open:
+            try:
+                ser.write(packet.encode("ascii"))
+                ser.flush()
+            except Exception:
+                pass
+        time.sleep(interval)
+    state.robot_tx_running = False
 
 
 # ── Continuous transmit thread (sender mode) ─────────────────────────────────
@@ -306,6 +368,15 @@ class TransmitRequest(BaseModel):
     interval: float = 1.0
 
 
+class RobotPositionRequest(BaseModel):
+    lat: float
+    lon: float
+
+
+class RobotTransmitRequest(BaseModel):
+    interval: float = 1.0
+
+
 @app.post("/api/connect")
 async def connect(req: ConnectRequest):
     with state.lock:
@@ -363,6 +434,10 @@ async def status():
         "last_atv_lat": state.last_atv_lat,
         "last_atv_lon": state.last_atv_lon,
         "last_atv_time": state.last_atv_time,
+        "robot_tx_running": state.robot_tx_running,
+        "robot_tx_interval": state.robot_tx_interval,
+        "robot_lat": state.robot_lat,
+        "robot_lon": state.robot_lon,
     }
 
 
@@ -428,6 +503,40 @@ async def simulate_stop():
     return {"ok": True}
 
 
+@app.post("/api/robot/position")
+async def robot_position(req: RobotPositionRequest):
+    """Browser pushes robot's geolocation here continuously."""
+    state.robot_lat = req.lat
+    state.robot_lon = req.lon
+    state.robot_time = datetime.now(timezone.utc).isoformat()
+    state.robot_pos_set = True
+    return {"ok": True}
+
+
+@app.post("/api/robot/transmit/start")
+async def robot_transmit_start(req: RobotTransmitRequest):
+    if state.robot_tx_running:
+        state.robot_tx_stop.set()
+        time.sleep(0.1)
+    state.robot_tx_stop.clear()
+    state.robot_tx_running = True
+    state.robot_tx_interval = req.interval
+    state.robot_tx_thread = threading.Thread(
+        target=robot_transmit_loop,
+        args=(req.interval,),
+        daemon=True,
+    )
+    state.robot_tx_thread.start()
+    return {"ok": True}
+
+
+@app.post("/api/robot/transmit/stop")
+async def robot_transmit_stop():
+    state.robot_tx_stop.set()
+    state.robot_tx_running = False
+    return {"ok": True}
+
+
 # ── WebSocket ─────────────────────────────────────────────────────────────────
 
 @app.websocket("/ws/gps")
@@ -456,3 +565,18 @@ async def ws_tx(websocket: WebSocket):
     finally:
         if websocket in state.tx_clients:
             state.tx_clients.remove(websocket)
+
+
+@app.websocket("/ws/robot")
+async def ws_robot(websocket: WebSocket):
+    """Sender browser connects here to receive incoming robot GPS packets."""
+    await websocket.accept()
+    state.robot_clients.append(websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        if websocket in state.robot_clients:
+            state.robot_clients.remove(websocket)
