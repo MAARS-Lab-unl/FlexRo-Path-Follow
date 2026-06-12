@@ -129,7 +129,8 @@ def serial_reader_loop():
             continue
         try:
             raw = ser.readline()
-        except Exception:
+        except Exception as e:
+            print(f"[serial] read error: {e}")
             time.sleep(0.1)
             continue
         if not raw:
@@ -137,6 +138,7 @@ def serial_reader_loop():
         line = raw.decode("ascii", errors="replace").strip()
         if not line:
             continue
+        print(f"[serial] received: {line}")
         receive_time = datetime.now(timezone.utc).isoformat()
         data = None
         try:
@@ -144,6 +146,7 @@ def serial_reader_loop():
         except json.JSONDecodeError:
             pass
         if data is not None and data.get("type") == "gps":
+            print(f"[serial] broadcasting GPS to {len(state.ws_clients)} WebSocket client(s)")
             broadcast_sync(state.ws_clients, {
                 "type": "gps",
                 "receive_time_utc": receive_time,
@@ -156,6 +159,7 @@ def serial_reader_loop():
             parsed = _parse_nmea_lat_lon(line)
             if parsed:
                 lat, lon = parsed
+                print(f"[serial] broadcasting NMEA to {len(state.ws_clients)} WebSocket client(s)")
                 broadcast_sync(state.ws_clients, {
                     "type": "gps",
                     "receive_time_utc": receive_time,
