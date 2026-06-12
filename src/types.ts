@@ -5,6 +5,7 @@ export interface GpsPacket {
   lon: number;
   timestamp_utc?: string;
   source: string;
+  device_id?: string;
   raw?: string;
 }
 
@@ -15,4 +16,5 @@ export interface ConnectionConfig {
   port: string;
   baud: number;
   mode: AppMode;
+  deviceId: string;
 }

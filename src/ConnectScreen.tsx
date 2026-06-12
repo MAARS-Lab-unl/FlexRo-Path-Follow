@@ -12,17 +12,21 @@ export default function ConnectScreen({ onConnected }: Props) {
   const [mode, setMode] = useState<AppMode>("receiver");
   const [port, setPort] = useState("/dev/ttyUSB0");
   const [baud, setBaud] = useState(57600);
+  const [deviceId, setDeviceId] = useState("");
   const [status, setStatus] = useState<Status>("idle");
   const [errorMsg, setErrorMsg] = useState("");
+
+  const defaultDeviceId = mode === "sender" ? "ATV-1" : "ROBOT-1";
+  const finalDeviceId = deviceId.trim() || defaultDeviceId;
 
   async function handleConnect() {
     setStatus("connecting");
     setErrorMsg("");
     try {
-      const res = await api.connect(port, baud);
+      const res = await api.connect(port, baud, finalDeviceId);
       if (res.ok) {
         setStatus("success");
-        setTimeout(() => onConnected({ port, baud, mode }), 800);
+        setTimeout(() => onConnected({ port, baud, mode, deviceId: finalDeviceId }), 800);
       } else {
         setStatus("error");
         setErrorMsg(res.error || "Connection failed");
@@ -91,6 +95,15 @@ export default function ConnectScreen({ onConnected }: Props) {
             ? "Connect to the RFD 900x-US on the robot. The map will stream the ATV's live position."
             : "Connect to the RFD 900x-US on the ATV. This UI will continuously transmit GPS to the robot."}
         </p>
+
+        <label style={styles.label}>Device ID</label>
+        <input
+          style={styles.input}
+          value={deviceId}
+          onChange={(e) => setDeviceId(e.target.value)}
+          placeholder={defaultDeviceId}
+          disabled={status === "connecting"}
+        />
 
         <label style={styles.label}>Serial Port</label>
         <input

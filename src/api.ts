@@ -10,7 +10,7 @@ async function post(path: string, body?: object) {
 }
 
 export const api = {
-  connect: (port: string, baud: number) => post("/api/connect", { port, baud }),
+  connect: (port: string, baud: number, device_id: string) => post("/api/connect", { port, baud, device_id }),
   disconnect: () => post("/api/disconnect"),
   status: () => fetch(`${BASE}/api/status`).then((r) => r.json()),
   send: (lat: number, lon: number) => post("/api/send", { lat, lon }),

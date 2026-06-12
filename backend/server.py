@@ -69,6 +69,17 @@ class AppState:
         self.tx_stop = threading.Event()
         self.tx_running: bool = False
         self.tx_count: int = 0
+        self.tx_lat: float = 0.0
+        self.tx_lon: float = 0.0
+        self.tx_interval: float = 1.0
+        self.device_id: str = "ATV-1"
+
+        # last received ATV info (receiver side)
+        self.last_atv_lat: float = 0.0
+        self.last_atv_lon: float = 0.0
+        self.last_atv_device_id: str = ""
+        self.last_atv_time: str = ""
+        self.atv_paired: bool = False
 
 state = AppState()
 _main_loop: asyncio.AbstractEventLoop | None = None
@@ -147,6 +158,11 @@ def serial_reader_loop():
             pass
         if data is not None and data.get("type") == "gps":
             print(f"[serial] broadcasting GPS to {len(state.ws_clients)} WebSocket client(s)")
+            state.last_atv_lat = data.get("lat", 0.0)
+            state.last_atv_lon = data.get("lon", 0.0)
+            state.last_atv_device_id = data.get("device_id", "unknown")
+            state.last_atv_time = receive_time
+            state.atv_paired = True
             broadcast_sync(state.ws_clients, {
                 "type": "gps",
                 "receive_time_utc": receive_time,
@@ -154,6 +170,7 @@ def serial_reader_loop():
                 "lon": data.get("lon"),
                 "timestamp_utc": data.get("timestamp_utc"),
                 "source": data.get("source", "serial"),
+                "device_id": data.get("device_id", ""),
             })
         elif line.startswith("$GPRMC") or line.startswith("$GNRMC"):
             parsed = _parse_nmea_lat_lon(line)
@@ -179,12 +196,19 @@ def simulation_loop(start_lat: float, start_lon: float, interval: float):
         angle = step * 0.1
         lat = start_lat + radius * math.sin(angle) + random.uniform(-0.00002, 0.00002)
         lon = start_lon + radius * math.cos(angle) + random.uniform(-0.00002, 0.00002)
+        now = datetime.now(timezone.utc).isoformat()
+        state.last_atv_lat = round(lat, 7)
+        state.last_atv_lon = round(lon, 7)
+        state.last_atv_device_id = "SIM-ATV"
+        state.last_atv_time = now
+        state.atv_paired = True
         broadcast_sync(state.ws_clients, {
             "type": "gps",
-            "receive_time_utc": datetime.now(timezone.utc).isoformat(),
+            "receive_time_utc": now,
             "lat": round(lat, 7),
             "lon": round(lon, 7),
             "source": "simulated",
+            "device_id": "SIM-ATV",
         })
         step += 1
         time.sleep(interval)
@@ -200,6 +224,7 @@ def _make_json_packet(lat: float, lon: float) -> str:
         "lat": round(lat, 7),
         "lon": round(lon, 7),
         "source": "atv",
+        "device_id": state.device_id,
         "radio": "RFD 900x-US",
     }) + "\r\n"
 
@@ -261,6 +286,7 @@ async def shutdown():
 class ConnectRequest(BaseModel):
     port: str = "/dev/ttyUSB0"
     baud: int = 57600
+    device_id: str = "ATV-1"
 
 
 class SendRequest(BaseModel):
@@ -300,6 +326,7 @@ async def connect(req: ConnectRequest):
             state.ser = ser
             state.port = req.port
             state.baud = req.baud
+            state.device_id = req.device_id
             state.connected = True
             return {"ok": True, "port": req.port, "baud": req.baud}
         except Exception as e:
@@ -324,9 +351,18 @@ async def status():
         "connected": state.connected,
         "port": state.port,
         "baud": state.baud,
+        "device_id": state.device_id,
         "sim_running": state.sim_running,
         "tx_running": state.tx_running,
         "tx_count": state.tx_count,
+        "tx_lat": state.tx_lat,
+        "tx_lon": state.tx_lon,
+        "tx_interval": state.tx_interval,
+        "atv_paired": state.atv_paired,
+        "last_atv_device_id": state.last_atv_device_id,
+        "last_atv_lat": state.last_atv_lat,
+        "last_atv_lon": state.last_atv_lon,
+        "last_atv_time": state.last_atv_time,
     }
 
 
@@ -351,6 +387,9 @@ async def transmit_start(req: TransmitRequest):
         time.sleep(0.1)
     state.tx_stop.clear()
     state.tx_running = True
+    state.tx_lat = req.lat
+    state.tx_lon = req.lon
+    state.tx_interval = req.interval
     state.tx_thread = threading.Thread(
         target=transmit_loop,
         args=(req.lat, req.lon, req.interval),
