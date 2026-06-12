@@ -71,6 +71,7 @@ class AppState:
         self.tx_count: int = 0
 
 state = AppState()
+_main_loop: asyncio.AbstractEventLoop | None = None
 
 
 # ── broadcast helpers ─────────────────────────────────────────────────────────
@@ -88,8 +89,9 @@ async def _broadcast(clients: list[WebSocket], payload: dict):
 
 
 def broadcast_sync(clients: list[WebSocket], payload: dict):
-    loop = asyncio.get_event_loop()
-    asyncio.run_coroutine_threadsafe(_broadcast(clients, payload), loop)
+    if _main_loop is None:
+        return
+    asyncio.run_coroutine_threadsafe(_broadcast(clients, payload), _main_loop)
 
 
 # ── Serial reader thread (receiver mode) ─────────────────────────────────────
@@ -233,6 +235,8 @@ def transmit_loop(lat: float, lon: float, interval: float):
 
 @app.on_event("startup")
 async def startup():
+    global _main_loop
+    _main_loop = asyncio.get_event_loop()
     state.reader_stop.clear()
     state.reader_thread = threading.Thread(target=serial_reader_loop, daemon=True)
     state.reader_thread.start()
