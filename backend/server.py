@@ -27,9 +27,16 @@ from datetime import datetime, timezone
 from typing import Optional
 
 import serial
+import serial.tools.list_ports
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
+try:
+    from pymavlink import mavutil as _mavutil
+    HAS_MAVLINK = True
+except ImportError:
+    HAS_MAVLINK = False
 
 app = FastAPI()
 
@@ -95,6 +102,18 @@ class AppState:
 
         # WebSocket clients that receive incoming robot GPS (on sender side)
         self.robot_clients: list[WebSocket] = []
+
+        # MAVLink (Cube Orange) GPS reader — sender side only
+        self.mav_conn = None           # mavutil connection object
+        self.mav_port: str = ""
+        self.mav_baud: int = 115200
+        self.mav_connected: bool = False
+        self.mav_fix_type: int = 0
+        self.mav_satellites: int = 0
+        self.mav_thread: Optional[threading.Thread] = None
+        self.mav_stop = threading.Event()
+        # WebSocket clients that receive live MAVLink GPS (sender browser)
+        self.mav_clients: list[WebSocket] = []
 
 state = AppState()
 _main_loop: asyncio.AbstractEventLoop | None = None
@@ -294,7 +313,10 @@ def _make_json_packet(lat: float, lon: float) -> str:
 def transmit_loop(lat: float, lon: float, interval: float):
     state.tx_count = 0
     while not state.tx_stop.is_set():
-        packet = _make_json_packet(lat, lon)
+        # Use live MAVLink GPS if available, else fall back to the initial lat/lon
+        cur_lat = state.tx_lat if state.mav_connected and state.tx_lat != 0.0 else lat
+        cur_lon = state.tx_lon if state.mav_connected and state.tx_lon != 0.0 else lon
+        packet = _make_json_packet(cur_lat, cur_lon)
         sent = False
         error = None
         with state.lock:
@@ -320,6 +342,70 @@ def transmit_loop(lat: float, lon: float, interval: float):
         broadcast_sync(state.tx_clients, log_entry)
         time.sleep(interval)
     state.tx_running = False
+
+
+# ── MAVLink GPS reader thread (sender / ATV side) ────────────────────────────
+
+def mavlink_reader_loop():
+    """Reads GPS_RAW_INT from Cube Orange and updates state.tx_lat/tx_lon live."""
+    conn = state.mav_conn
+    if conn is None:
+        return
+    print(f"[mav] waiting for heartbeat on {state.mav_port}…")
+    try:
+        conn.wait_heartbeat(timeout=10)
+    except Exception as e:
+        print(f"[mav] heartbeat timeout: {e}")
+        state.mav_connected = False
+        return
+    print(f"[mav] connected — system {conn.target_system} component {conn.target_component}")
+    while not state.mav_stop.is_set():
+        try:
+            msg = conn.recv_match(type="GPS_RAW_INT", blocking=True, timeout=2)
+        except Exception as e:
+            print(f"[mav] recv error: {e}")
+            time.sleep(0.5)
+            continue
+        if msg is None:
+            continue
+        lat = msg.lat / 1e7
+        lon = msg.lon / 1e7
+        fix = msg.fix_type
+        sats = msg.satellites_visible
+        now = datetime.now(timezone.utc).isoformat()
+        state.tx_lat = lat
+        state.tx_lon = lon
+        state.mav_fix_type = fix
+        state.mav_satellites = sats
+        print(f"[mav] GPS fix={fix} sats={sats} lat={lat:.6f} lon={lon:.6f}")
+        payload = {
+            "type": "mav_gps",
+            "time": now,
+            "lat": lat,
+            "lon": lon,
+            "fix_type": fix,
+            "satellites": sats,
+        }
+        broadcast_sync(state.mav_clients, payload)
+    print("[mav] reader stopped")
+    state.mav_connected = False
+
+
+# ── USB port scanner ──────────────────────────────────────────────────────────
+
+_RFD_HINTS = {"rfd", "sik", "900x", "ftdi", "cp210", "ch340", "ch341", "prolific", "pl2303"}
+_MAV_HINTS = {"cube", "pixhawk", "ardupilot", "mav", "stm32", "blackmagic"}
+
+def _classify_port(p) -> str:
+    desc = (p.description or "").lower()
+    mfr  = (p.manufacturer or "").lower()
+    prod = (getattr(p, "product", None) or "").lower()
+    combined = f"{desc} {mfr} {prod}"
+    if any(h in combined for h in _MAV_HINTS):
+        return "cube"
+    if any(h in combined for h in _RFD_HINTS):
+        return "rfd"
+    return "serial"
 
 
 # ── Startup / shutdown ────────────────────────────────────────────────────────
@@ -375,6 +461,70 @@ class RobotPositionRequest(BaseModel):
 
 class RobotTransmitRequest(BaseModel):
     interval: float = 1.0
+
+
+class MavlinkConnectRequest(BaseModel):
+    port: str = "COM7"
+    baud: int = 115200
+
+
+@app.get("/api/ports")
+async def list_ports():
+    """Return real USB serial ports (skips built-in ttyS* with no manufacturer)."""
+    ports = []
+    for p in serial.tools.list_ports.comports():
+        # Skip bare system serial ports that have no real hardware attached
+        if not p.manufacturer and (not p.description or p.description.strip().lower() == "n/a"):
+            continue
+        ports.append({
+            "port": p.device,
+            "description": p.description,
+            "manufacturer": p.manufacturer,
+            "type": _classify_port(p),
+        })
+    return {"ports": ports}
+
+
+@app.post("/api/mavlink/connect")
+async def mavlink_connect(req: MavlinkConnectRequest):
+    if not HAS_MAVLINK:
+        return {"ok": False, "error": "pymavlink not installed — run: pip install pymavlink"}
+    # stop existing reader
+    state.mav_stop.set()
+    if state.mav_thread and state.mav_thread.is_alive():
+        state.mav_thread.join(timeout=3)
+    if state.mav_conn:
+        try:
+            state.mav_conn.close()
+        except Exception:
+            pass
+        state.mav_conn = None
+    state.mav_connected = False
+    try:
+        conn = _mavutil.mavlink_connection(req.port, baud=req.baud)
+        state.mav_conn = conn
+        state.mav_port = req.port
+        state.mav_baud = req.baud
+        state.mav_connected = True
+        state.mav_stop.clear()
+        state.mav_thread = threading.Thread(target=mavlink_reader_loop, daemon=True)
+        state.mav_thread.start()
+        return {"ok": True, "port": req.port, "baud": req.baud}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/mavlink/disconnect")
+async def mavlink_disconnect():
+    state.mav_stop.set()
+    if state.mav_conn:
+        try:
+            state.mav_conn.close()
+        except Exception:
+            pass
+        state.mav_conn = None
+    state.mav_connected = False
+    return {"ok": True}
 
 
 @app.post("/api/connect")
@@ -438,6 +588,11 @@ async def status():
         "robot_tx_interval": state.robot_tx_interval,
         "robot_lat": state.robot_lat,
         "robot_lon": state.robot_lon,
+        "mav_connected": state.mav_connected,
+        "mav_port": state.mav_port,
+        "mav_baud": state.mav_baud,
+        "mav_fix_type": state.mav_fix_type,
+        "mav_satellites": state.mav_satellites,
     }
 
 
@@ -580,3 +735,28 @@ async def ws_robot(websocket: WebSocket):
     finally:
         if websocket in state.robot_clients:
             state.robot_clients.remove(websocket)
+
+
+@app.websocket("/ws/mav")
+async def ws_mav(websocket: WebSocket):
+    """Sender browser connects here to receive live MAVLink GPS from Cube Orange."""
+    await websocket.accept()
+    state.mav_clients.append(websocket)
+    # Send current fix immediately so the browser doesn't wait for next packet
+    if state.mav_connected and state.tx_lat != 0.0:
+        await websocket.send_json({
+            "type": "mav_gps",
+            "time": datetime.now(timezone.utc).isoformat(),
+            "lat": state.tx_lat,
+            "lon": state.tx_lon,
+            "fix_type": state.mav_fix_type,
+            "satellites": state.mav_satellites,
+        })
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        if websocket in state.mav_clients:
+            state.mav_clients.remove(websocket)

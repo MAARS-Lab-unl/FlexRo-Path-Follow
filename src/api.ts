@@ -25,4 +25,8 @@ export const api = {
   robotTransmitStart: (interval: number) =>
     post("/api/robot/transmit/start", { interval }),
   robotTransmitStop: () => post("/api/robot/transmit/stop"),
+  ports: () => fetch(`${BASE}/api/ports`).then((r) => r.json()),
+  mavlinkConnect: (port: string, baud: number) =>
+    post("/api/mavlink/connect", { port, baud }),
+  mavlinkDisconnect: () => post("/api/mavlink/disconnect"),
 };

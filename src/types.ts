@@ -17,4 +17,6 @@ export interface ConnectionConfig {
   baud: number;
   mode: AppMode;
   deviceId: string;
+  mavPort?: string;
+  mavBaud?: number;
 }

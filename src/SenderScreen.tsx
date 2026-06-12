@@ -10,10 +10,10 @@ import { api } from "./api";
 import { ConnectionConfig } from "./types";
 import { haversineMeters, formatDistance } from "./geoUtils";
 
-const WS_TX_URL = (process.env.REACT_APP_WS_URL || "ws://localhost:8000/ws/gps")
-  .replace("/ws/gps", "/ws/tx");
-const WS_ROBOT_URL = (process.env.REACT_APP_WS_URL || "ws://localhost:8000/ws/gps")
-  .replace("/ws/gps", "/ws/robot");
+const WS_BASE = process.env.REACT_APP_WS_URL || "ws://localhost:8000/ws/gps";
+const WS_TX_URL    = WS_BASE.replace("/ws/gps", "/ws/tx");
+const WS_ROBOT_URL = WS_BASE.replace("/ws/gps", "/ws/robot");
+const WS_MAV_URL   = WS_BASE.replace("/ws/gps", "/ws/mav");
 
 const MAP_CONTAINER_STYLE = { width: "100%", height: "100%" };
 const DEFAULT_CENTER = { lat: 32.7767, lng: -96.797 };
@@ -53,6 +53,12 @@ export default function SenderScreen({ connection, onDisconnect }: Props) {
   const [robotPos, setRobotPos] = useState<google.maps.LatLngLiteral | null>(null);
   const [robotDeviceId, setRobotDeviceId] = useState("ROBOT");
   const [showRobotInfo, setShowRobotInfo] = useState(false);
+  // MAVLink / Cube Orange GPS state
+  const [mavConnected, setMavConnected] = useState(false);
+  const [mavFixType, setMavFixType] = useState(0);
+  const [mavSatellites, setMavSatellites] = useState(0);
+  const mavWsRef = useRef<WebSocket | null>(null);
+
   const mapRef = useRef<google.maps.Map | null>(null);
   const firstFix = useRef(false);
 
@@ -116,6 +122,49 @@ export default function SenderScreen({ connection, onDisconnect }: Props) {
     return () => ws.close();
   }, []);
 
+  // MAVLink GPS WebSocket — live GPS from Cube Orange
+  useEffect(() => {
+    if (!connection.mavPort) return;  // Only connect if MAVLink was configured
+    // Trigger backend to connect to Cube Orange
+    api.mavlinkConnect(connection.mavPort, connection.mavBaud ?? 115200).then((r) => {
+      if (r.ok) setMavConnected(true);
+    });
+    const ws = new WebSocket(WS_MAV_URL);
+    mavWsRef.current = ws;
+    ws.onmessage = (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        if (data.type === "mav_gps") {
+          setMavFixType(data.fix_type ?? 0);
+          setMavSatellites(data.satellites ?? 0);
+          setMavConnected(true);
+          // Auto-fill coordinates if not already transmitting
+          if (data.lat && data.lon) {
+            setLat(data.lat.toFixed(7));
+            setLon(data.lon.toFixed(7));
+            const pos = { lat: data.lat, lng: data.lon };
+            setAtvPos(pos);
+            setTrail((prev) => {
+              const next = [...prev, pos];
+              return next.length > MAX_TRAIL ? next.slice(next.length - MAX_TRAIL) : next;
+            });
+            if (!firstFix.current && mapRef.current) {
+              mapRef.current.panTo(pos);
+              mapRef.current.setZoom(17);
+              firstFix.current = true;
+            }
+          }
+        }
+      } catch {}
+    };
+    ws.onclose = () => { mavWsRef.current = null; };
+    return () => {
+      ws.close();
+      api.mavlinkDisconnect();
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Restore state on mount (page refresh)
   useEffect(() => {
     api.status().then((s) => {
@@ -124,6 +173,9 @@ export default function SenderScreen({ connection, onDisconnect }: Props) {
       if (s.tx_interval) setIntervalSec(s.tx_interval);
       if (s.tx_running) setTransmitting(true);
       if (s.tx_count) setTotalSent(s.tx_count);
+      if (s.mav_connected) setMavConnected(true);
+      if (s.mav_fix_type) setMavFixType(s.mav_fix_type);
+      if (s.mav_satellites) setMavSatellites(s.mav_satellites);
       // Restore map position
       if (s.tx_lat && s.tx_lon) {
         const pos = { lat: s.tx_lat, lng: s.tx_lon };
@@ -179,6 +231,15 @@ export default function SenderScreen({ connection, onDisconnect }: Props) {
           <span style={styles.greenDot} />
           {connection.port} @ {connection.baud}
         </span>
+        {connection.mavPort && (
+          mavConnected ? (
+            <span style={styles.mavPill}>
+              🛰 Cube Orange · Fix {mavFixType} · {mavSatellites} sats
+            </span>
+          ) : (
+            <span style={styles.mavWaitPill}>🛰 Connecting to Cube Orange…</span>
+          )
+        )}
         {transmitting && (
           <span style={styles.txPill}>
             <span style={styles.pulseDot} />
@@ -202,13 +263,39 @@ export default function SenderScreen({ connection, onDisconnect }: Props) {
         {/* Left — controls */}
         <div style={styles.panel}>
           <h3 style={styles.heading}>ATV GPS Position</h3>
-          <p style={styles.hint}>
-            Set coordinates to transmit over RFD 900x-US to the robot.
-          </p>
+          {connection.mavPort ? (
+            <div style={{
+              ...styles.mavCard,
+              borderColor: mavConnected ? (mavFixType >= 3 ? "#22c55e" : "#f59e0b") : "#334155",
+            }}>
+              <div style={styles.mavCardTitle}>Cube Orange</div>
+              {mavConnected ? (
+                <>
+                  <div style={styles.mavStat}>
+                    <span style={{ color: mavFixType >= 3 ? "#22c55e" : "#f59e0b" }}>
+                      {mavFixType >= 3 ? "✓ 3D Fix" : mavFixType >= 2 ? "⚠ 2D Fix" : "✗ No Fix"}
+                    </span>
+                    <span style={{ color: "#64748b" }}>{mavSatellites} sats</span>
+                  </div>
+                  <div style={{ color: "#64748b", fontSize: 10 }}>
+                    GPS auto-fills below. Edit manually to override.
+                  </div>
+                </>
+              ) : (
+                <div style={{ color: "#64748b", fontSize: 11 }}>Connecting to {connection.mavPort}…</div>
+              )}
+            </div>
+          ) : (
+            <p style={styles.hint}>
+              Set coordinates to transmit over RFD 900x-US to the robot.
+            </p>
+          )}
 
-          <button style={styles.geoBtn} onClick={loadCurrentLocation} disabled={geoLoading}>
-            {geoLoading ? "Locating…" : "Use My Current Location"}
-          </button>
+          {!connection.mavPort && (
+            <button style={styles.geoBtn} onClick={loadCurrentLocation} disabled={geoLoading}>
+              {geoLoading ? "Locating…" : "Use My Current Location"}
+            </button>
+          )}
 
           <label style={styles.label}>Latitude</label>
           <input
@@ -234,9 +321,20 @@ export default function SenderScreen({ connection, onDisconnect }: Props) {
             disabled={transmitting}
           />
 
+          {connection.mavPort && !transmitting && mavFixType < 3 && (
+            <div style={{ color: "#f59e0b", fontSize: 11, textAlign: "center", padding: "4px 0" }}>
+              Waiting for GPS fix ({mavFixType < 1 ? "no signal" : mavFixType === 1 ? "no fix" : "2D fix"})…
+            </div>
+          )}
           <button
-            style={{ ...styles.txBtn, background: transmitting ? "#dc2626" : "#16a34a" }}
+            style={{
+              ...styles.txBtn,
+              background: transmitting ? "#dc2626" : "#16a34a",
+              opacity: (!transmitting && connection.mavPort && mavFixType < 3) ? 0.4 : 1,
+              cursor: (!transmitting && connection.mavPort && mavFixType < 3) ? "not-allowed" : "pointer",
+            }}
             onClick={handleToggle}
+            disabled={!transmitting && !!connection.mavPort && mavFixType < 3}
           >
             {transmitting ? "⏹ Stop Transmitting" : "▶ Start Transmitting"}
           </button>
@@ -375,6 +473,11 @@ const styles: Record<string, React.CSSProperties> = {
   pulseDot: { width: 7, height: 7, borderRadius: "50%", background: "#22c55e", flexShrink: 0, animation: "pulse 1.2s infinite" },
   pairedPill: { background: "#052e16", color: "#4ade80", borderRadius: 20, padding: "3px 12px", fontSize: 12, fontFamily: "monospace" },
   waitingPill: { color: "#475569", fontSize: 12, fontStyle: "italic" },
+  mavPill: { background: "#1e1b4b", color: "#a5b4fc", borderRadius: 20, padding: "3px 12px", fontSize: 12, fontFamily: "monospace" },
+  mavWaitPill: { color: "#475569", fontSize: 12, fontStyle: "italic" },
+  mavCard: { background: "#0f172a", border: "1px solid #334155", borderRadius: 8, padding: "10px 12px", display: "flex", flexDirection: "column" as const, gap: 4, marginBottom: 4 },
+  mavCardTitle: { color: "#a78bfa", fontSize: 11, fontWeight: 700, textTransform: "uppercase" as const, letterSpacing: 0.5 },
+  mavStat: { display: "flex", justifyContent: "space-between", fontSize: 12, fontWeight: 600 },
   discBtn: { marginLeft: "auto", background: "#7f1d1d", color: "#fca5a5", border: "none", borderRadius: 6, padding: "6px 14px", cursor: "pointer", fontWeight: 600, fontSize: 13 },
   body: { display: "flex", flex: 1, overflow: "hidden" },
   panel: { width: 240, background: "#1e293b", padding: "16px 14px", display: "flex", flexDirection: "column", gap: 6, overflowY: "auto", flexShrink: 0, borderRight: "1px solid #334155" },
