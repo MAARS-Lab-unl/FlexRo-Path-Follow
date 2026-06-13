@@ -20,7 +20,7 @@ export default function ConnectScreen({ onConnected }: Props) {
   const [port, setPort] = useState("/dev/ttyUSB0");
   const [baud, setBaud] = useState(57600);
   const [deviceId, setDeviceId] = useState("");
-  const [mavPort, setMavPort] = useState("COM7");
+  const [mavPort, setMavPort] = useState("");
   const [mavBaud, setMavBaud] = useState(115200);
   const [useMavlink, setUseMavlink] = useState(true);
   const [status, setStatus] = useState<Status>("idle");
