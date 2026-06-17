@@ -57,6 +57,7 @@ export default function SenderScreen({ connection, onDisconnect }: Props) {
   const [mavConnected, setMavConnected] = useState(false);
   const [mavFixType, setMavFixType] = useState(0);
   const [mavSatellites, setMavSatellites] = useState(0);
+  const [atvHeading, setAtvHeading] = useState<number>(0);
   const mavWsRef = useRef<WebSocket | null>(null);
 
   const mapRef = useRef<google.maps.Map | null>(null);
@@ -131,6 +132,22 @@ export default function SenderScreen({ connection, onDisconnect }: Props) {
             setLat(data.lat.toFixed(7));
             setLon(data.lon.toFixed(7));
             const pos = { lat: data.lat, lng: data.lon };
+            // Use COG from GPS if available, else compute from last two positions
+            if (data.cog != null) {
+              setAtvHeading(data.cog);
+            } else {
+              setAtvPos((prev) => {
+                if (prev) {
+                  const dx = data.lon - prev.lng;
+                  const dy = data.lat - prev.lat;
+                  if (Math.abs(dx) > 1e-7 || Math.abs(dy) > 1e-7) {
+                    const computed = (Math.atan2(dx, dy) * 180) / Math.PI;
+                    setAtvHeading((computed + 360) % 360);
+                  }
+                }
+                return prev;
+              });
+            }
             setAtvPos(pos);
             setTrail((prev) => {
               const next = [...prev, pos];
@@ -367,6 +384,7 @@ export default function SenderScreen({ connection, onDisconnect }: Props) {
                     fillOpacity: 1,
                     strokeColor: "#fff",
                     strokeWeight: 1.5,
+                    rotation: atvHeading,
                   }}
                 />
               )}
@@ -425,7 +443,8 @@ export default function SenderScreen({ connection, onDisconnect }: Props) {
           )}
         </div>
 
-        {/* Right — TX log */}
+        {/* Right — TX log (bottom half only) */}
+        <div style={{ width: 260, display: "flex", flexDirection: "column", borderLeft: "1px solid #334155", flexShrink: 0, justifyContent: "flex-end" }}>
         <div style={styles.logPanel}>
           <div style={styles.logHeader}>
             <span style={styles.logTitle}>TX Log</span>
@@ -446,6 +465,7 @@ export default function SenderScreen({ connection, onDisconnect }: Props) {
             ))}
             <div ref={logEndRef} />
           </div>
+        </div>
         </div>
 
       </div>
@@ -485,7 +505,7 @@ const styles: Record<string, React.CSSProperties> = {
   noFixOverlay: { position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(15,23,42,0.6)", backdropFilter: "blur(4px)", pointerEvents: "none" },
   noFixBox: { background: "#1e293b", borderRadius: 12, padding: "24px 28px", maxWidth: 320, display: "flex", gap: 14, alignItems: "flex-start", pointerEvents: "auto" },
   pulse: { width: 14, height: 14, borderRadius: "50%", background: "#f59e0b", flexShrink: 0, marginTop: 3, animation: "pulse 1.5s infinite" },
-  logPanel: { width: 260, display: "flex", flexDirection: "column", overflow: "hidden", borderLeft: "1px solid #334155", flexShrink: 0 },
+  logPanel: { display: "flex", flexDirection: "column", overflow: "hidden", height: "50%", flexShrink: 0 },
   logHeader: { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 14px", borderBottom: "1px solid #334155", flexShrink: 0, background: "#1e293b" },
   logTitle: { color: "#f1f5f9", fontWeight: 700, fontSize: 13 },
   clearBtn: { background: "#334155", color: "#94a3b8", border: "none", borderRadius: 5, padding: "3px 8px", cursor: "pointer", fontSize: 11 },

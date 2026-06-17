@@ -28,6 +28,7 @@ export default function MapScreen({ connection, onDisconnect }: Props) {
   // ATV state
   const [atvPos, setAtvPos] = useState<google.maps.LatLngLiteral | null>(null);
   const [atvTrail, setAtvTrail] = useState<google.maps.LatLngLiteral[]>([]);
+  const [atvHeading, setAtvHeading] = useState<number>(0);
   const [lastPacket, setLastPacket] = useState<GpsPacket | null>(null);
   const [showAtvInfo, setShowAtvInfo] = useState(false);
   const [packetCount, setPacketCount] = useState(0);
@@ -69,6 +70,21 @@ export default function MapScreen({ connection, onDisconnect }: Props) {
 
   const onPacket = useCallback((p: GpsPacket) => {
     const pos = { lat: p.lat, lng: p.lon };
+    // Use COG from packet if available, else compute from previous position
+    if (p.cog != null) {
+      setAtvHeading(p.cog);
+    } else {
+      setAtvPos((prev) => {
+        if (prev) {
+          const dx = p.lon - prev.lng;
+          const dy = p.lat - prev.lat;
+          if (Math.abs(dx) > 1e-7 || Math.abs(dy) > 1e-7) {
+            setAtvHeading(((Math.atan2(dx, dy) * 180) / Math.PI + 360) % 360);
+          }
+        }
+        return prev;
+      });
+    }
     setAtvPos(pos);
     setLastPacket(p);
     setPacketCount((n) => n + 1);
@@ -271,6 +287,7 @@ export default function MapScreen({ connection, onDisconnect }: Props) {
                     fillOpacity: 1,
                     strokeColor: "#fff",
                     strokeWeight: 1.5,
+                    rotation: atvHeading,
                   }}
                 >
                   {showAtvInfo && lastPacket && (

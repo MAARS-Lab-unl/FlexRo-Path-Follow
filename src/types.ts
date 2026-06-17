@@ -7,6 +7,7 @@ export interface GpsPacket {
   source: string;
   device_id?: string;
   raw?: string;
+  cog?: number;
 }
 
 export type AppMode = "receiver" | "sender";

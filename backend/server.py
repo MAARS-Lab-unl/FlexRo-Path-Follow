@@ -110,6 +110,7 @@ class AppState:
         self.mav_connected: bool = False
         self.mav_fix_type: int = 0
         self.mav_satellites: int = 0
+        self.mav_cog: Optional[float] = None  # course over ground in degrees
         self.mav_thread: Optional[threading.Thread] = None
         self.mav_stop = threading.Event()
         # WebSocket clients that receive live MAVLink GPS (sender browser)
@@ -299,7 +300,7 @@ def robot_transmit_loop(interval: float):
 # ── Continuous transmit thread (sender mode) ─────────────────────────────────
 
 def _make_json_packet(lat: float, lon: float) -> str:
-    return json.dumps({
+    pkt: dict = {
         "type": "gps",
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "lat": round(lat, 7),
@@ -307,7 +308,10 @@ def _make_json_packet(lat: float, lon: float) -> str:
         "source": "atv",
         "device_id": state.device_id,
         "radio": "RFD 900x-US",
-    }) + "\r\n"
+    }
+    if state.mav_cog is not None:
+        pkt["cog"] = round(state.mav_cog, 1)
+    return json.dumps(pkt) + "\r\n"
 
 
 def transmit_loop(lat: float, lon: float, interval: float):
@@ -372,12 +376,16 @@ def mavlink_reader_loop():
         lon = msg.lon / 1e7
         fix = msg.fix_type
         sats = msg.satellites_visible
+        # cog = course over ground in centidegrees (65535 = unknown)
+        cog_raw = getattr(msg, "cog", 65535)
+        cog = (cog_raw / 100.0) if cog_raw != 65535 else None
         now = datetime.now(timezone.utc).isoformat()
         state.tx_lat = lat
         state.tx_lon = lon
         state.mav_fix_type = fix
         state.mav_satellites = sats
-        print(f"[mav] GPS fix={fix} sats={sats} lat={lat:.6f} lon={lon:.6f}")
+        state.mav_cog = cog
+        print(f"[mav] GPS fix={fix} sats={sats} lat={lat:.6f} lon={lon:.6f} cog={cog}")
         payload = {
             "type": "mav_gps",
             "time": now,
@@ -385,6 +393,7 @@ def mavlink_reader_loop():
             "lon": lon,
             "fix_type": fix,
             "satellites": sats,
+            "cog": cog,
         }
         broadcast_sync(state.mav_clients, payload)
     print("[mav] reader stopped")
