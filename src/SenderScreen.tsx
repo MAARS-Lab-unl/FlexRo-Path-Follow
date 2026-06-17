@@ -77,24 +77,12 @@ export default function SenderScreen({ connection, onDisconnect }: Props) {
       try {
         const data = JSON.parse(e.data) as TxLog;
         setTotalSent(data.count);
+        // Use live MAVLink coords for the log entry if available
         setLogs((prev) => {
           const next = [...prev, data];
           return next.length > 200 ? next.slice(next.length - 200) : next;
         });
-        // Update map position on every TX confirmation
-        const pos = { lat: data.lat, lng: data.lon };
-        setAtvPos(pos);
-        setTrail((prev) => {
-          const next = [...prev, pos];
-          return next.length > MAX_TRAIL ? next.slice(next.length - MAX_TRAIL) : next;
-        });
-        if (!firstFix.current && mapRef.current) {
-          mapRef.current.panTo(pos);
-          mapRef.current.setZoom(17);
-          firstFix.current = true;
-        } else if (mapRef.current) {
-          mapRef.current.panTo(pos);
-        }
+        // Don't update trail/map from TX log — MAVLink WebSocket drives the map
       } catch {}
     };
     ws.onclose = () => { wsRef.current = null; };
@@ -148,10 +136,14 @@ export default function SenderScreen({ connection, onDisconnect }: Props) {
               const next = [...prev, pos];
               return next.length > MAX_TRAIL ? next.slice(next.length - MAX_TRAIL) : next;
             });
-            if (!firstFix.current && mapRef.current) {
-              mapRef.current.panTo(pos);
-              mapRef.current.setZoom(17);
-              firstFix.current = true;
+            if (mapRef.current) {
+              if (!firstFix.current) {
+                mapRef.current.panTo(pos);
+                mapRef.current.setZoom(17);
+                firstFix.current = true;
+              } else {
+                mapRef.current.panTo(pos);
+              }
             }
           }
         }

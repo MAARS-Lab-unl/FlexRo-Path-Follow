@@ -333,8 +333,8 @@ def transmit_loop(lat: float, lon: float, interval: float):
         log_entry = {
             "type": "tx_log",
             "time": datetime.now(timezone.utc).isoformat(),
-            "lat": lat,
-            "lon": lon,
+            "lat": cur_lat,
+            "lon": cur_lon,
             "sent": sent,
             "count": state.tx_count,
             "error": error,
