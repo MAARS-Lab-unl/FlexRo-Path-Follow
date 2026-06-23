@@ -58,6 +58,7 @@ export default function SenderScreen({ connection, onDisconnect }: Props) {
   const [mavFixType, setMavFixType] = useState(0);
   const [mavSatellites, setMavSatellites] = useState(0);
   const [atvHeading, setAtvHeading] = useState<number>(0);
+  const [speedMps, setSpeedMps] = useState<number>(0);
   const mavWsRef = useRef<WebSocket | null>(null);
 
   const mapRef = useRef<google.maps.Map | null>(null);
@@ -133,7 +134,8 @@ export default function SenderScreen({ connection, onDisconnect }: Props) {
             setLon(data.lon.toFixed(7));
             const pos = { lat: data.lat, lng: data.lon };
             // Use COG from GPS if available, else compute from last two positions
-            if (data.cog != null) {
+            if (data.speed_mps != null) setSpeedMps(data.speed_mps);
+          if (data.cog != null) {
               setAtvHeading(data.cog);
             } else {
               setAtvPos((prev) => {
@@ -443,9 +445,31 @@ export default function SenderScreen({ connection, onDisconnect }: Props) {
           )}
         </div>
 
-        {/* Right — TX log (bottom half only) */}
-        <div style={{ width: 260, display: "flex", flexDirection: "column", borderLeft: "1px solid #334155", flexShrink: 0, justifyContent: "flex-end" }}>
-        <div style={styles.logPanel}>
+        {/* Speedometer — top-right corner of map */}
+        <div style={{
+          position: "absolute", top: 12, right: 12, zIndex: 10,
+          background: "rgba(255,255,255,0.92)", backdropFilter: "blur(6px)",
+          border: "1px solid #cbd5e1", borderRadius: 12,
+          padding: "10px 16px", textAlign: "center", minWidth: 90,
+        }}>
+          <div style={{ color: "#0f172a", fontSize: 32, fontWeight: 800, fontFamily: "monospace", lineHeight: 1 }}>
+            {(speedMps * 3.6).toFixed(1)}
+          </div>
+          <div style={{ color: "#475569", fontSize: 11, marginTop: 2 }}>km/h</div>
+          <div style={{ color: "#94a3b8", fontSize: 10, marginTop: 4 }}>
+            {speedMps.toFixed(2)} m/s
+          </div>
+        </div>
+
+        {/* Right — TX log pinned to bottom-right corner */}
+        <div style={{
+          position: "absolute", bottom: 0, right: 0,
+          width: 260, height: "50%",
+          display: "flex", flexDirection: "column",
+          background: "#0f172a",
+          borderLeft: "1px solid #334155", borderTop: "1px solid #334155",
+          zIndex: 10,
+        }}>
           <div style={styles.logHeader}>
             <span style={styles.logTitle}>TX Log</span>
             <button style={styles.clearBtn} onClick={() => setLogs([])}>Clear</button>
@@ -465,7 +489,6 @@ export default function SenderScreen({ connection, onDisconnect }: Props) {
             ))}
             <div ref={logEndRef} />
           </div>
-        </div>
         </div>
 
       </div>
@@ -491,7 +514,7 @@ const styles: Record<string, React.CSSProperties> = {
   mavCardTitle: { color: "#a78bfa", fontSize: 11, fontWeight: 700, textTransform: "uppercase" as const, letterSpacing: 0.5 },
   mavStat: { display: "flex", justifyContent: "space-between", fontSize: 12, fontWeight: 600 },
   discBtn: { marginLeft: "auto", background: "#7f1d1d", color: "#fca5a5", border: "none", borderRadius: 6, padding: "6px 14px", cursor: "pointer", fontWeight: 600, fontSize: 13 },
-  body: { display: "flex", flex: 1, overflow: "hidden" },
+  body: { display: "flex", flex: 1, overflow: "hidden", position: "relative" },
   panel: { width: 240, background: "#1e293b", padding: "16px 14px", display: "flex", flexDirection: "column", gap: 6, overflowY: "auto", flexShrink: 0, borderRight: "1px solid #334155" },
   heading: { color: "#f1f5f9", fontSize: 11, fontWeight: 700, margin: "6px 0 2px", textTransform: "uppercase", letterSpacing: 0.5 },
   hint: { color: "#64748b", fontSize: 11, margin: 0, lineHeight: 1.5 },
@@ -505,7 +528,7 @@ const styles: Record<string, React.CSSProperties> = {
   noFixOverlay: { position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(15,23,42,0.6)", backdropFilter: "blur(4px)", pointerEvents: "none" },
   noFixBox: { background: "#1e293b", borderRadius: 12, padding: "24px 28px", maxWidth: 320, display: "flex", gap: 14, alignItems: "flex-start", pointerEvents: "auto" },
   pulse: { width: 14, height: 14, borderRadius: "50%", background: "#f59e0b", flexShrink: 0, marginTop: 3, animation: "pulse 1.5s infinite" },
-  logPanel: { display: "flex", flexDirection: "column", overflow: "hidden", height: "50%", flexShrink: 0 },
+  logPanel: { display: "none" },
   logHeader: { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 14px", borderBottom: "1px solid #334155", flexShrink: 0, background: "#1e293b" },
   logTitle: { color: "#f1f5f9", fontWeight: 700, fontSize: 13 },
   clearBtn: { background: "#334155", color: "#94a3b8", border: "none", borderRadius: 5, padding: "3px 8px", cursor: "pointer", fontSize: 11 },

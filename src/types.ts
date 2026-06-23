@@ -8,6 +8,7 @@ export interface GpsPacket {
   device_id?: string;
   raw?: string;
   cog?: number;
+  speed_mps?: number;
 }
 
 export type AppMode = "receiver" | "sender";

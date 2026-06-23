@@ -110,7 +110,8 @@ class AppState:
         self.mav_connected: bool = False
         self.mav_fix_type: int = 0
         self.mav_satellites: int = 0
-        self.mav_cog: Optional[float] = None  # course over ground in degrees
+        self.mav_cog: Optional[float] = None
+        self.mav_speed_mps: float = 0.0
         self.mav_thread: Optional[threading.Thread] = None
         self.mav_stop = threading.Event()
         # WebSocket clients that receive live MAVLink GPS (sender browser)
@@ -311,6 +312,8 @@ def _make_json_packet(lat: float, lon: float) -> str:
     }
     if state.mav_cog is not None:
         pkt["cog"] = round(state.mav_cog, 1)
+    if state.mav_speed_mps > 0:
+        pkt["speed_mps"] = round(state.mav_speed_mps, 2)
     return json.dumps(pkt) + "\r\n"
 
 
@@ -379,13 +382,17 @@ def mavlink_reader_loop():
         # cog = course over ground in centidegrees (65535 = unknown)
         cog_raw = getattr(msg, "cog", 65535)
         cog = (cog_raw / 100.0) if cog_raw != 65535 else None
+        # vel = ground speed in cm/s (65535 = unknown)
+        vel_raw = getattr(msg, "vel", 65535)
+        speed_mps = (vel_raw / 100.0) if vel_raw != 65535 else 0.0
         now = datetime.now(timezone.utc).isoformat()
         state.tx_lat = lat
         state.tx_lon = lon
         state.mav_fix_type = fix
         state.mav_satellites = sats
         state.mav_cog = cog
-        print(f"[mav] GPS fix={fix} sats={sats} lat={lat:.6f} lon={lon:.6f} cog={cog}")
+        state.mav_speed_mps = speed_mps
+        print(f"[mav] GPS fix={fix} sats={sats} lat={lat:.6f} lon={lon:.6f} cog={cog} speed={speed_mps:.1f}m/s")
         payload = {
             "type": "mav_gps",
             "time": now,
@@ -394,6 +401,7 @@ def mavlink_reader_loop():
             "fix_type": fix,
             "satellites": sats,
             "cog": cog,
+            "speed_mps": speed_mps,
         }
         broadcast_sync(state.mav_clients, payload)
     print("[mav] reader stopped")
